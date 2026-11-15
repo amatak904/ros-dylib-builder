@@ -25,11 +25,13 @@
 
 #include <dlfcn.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <mach/mach.h>
+#include <mach/mach_init.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -58,7 +60,7 @@ struct rebindings_entry {
   struct rebindings_entry *next;
 };
 
-static struct rebindings_entry *_rebindings_head;
+static struct rebindings_entry *_rebindings_head = NULL;
 
 static int prepend_rebindings(struct rebindings_entry **rebindings_head,
                               struct rebinding rebindings[],
@@ -89,9 +91,10 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
   uint32_t *indirect_symbol_indices = indirect_symtab + section->reserved1;
   void **indirect_symbol_bindings = (void **)((uintptr_t)slide + section->addr);
   if (isDataConst) {
-    mprotect(indirect_symbol_bindings, section->size, PROT_READ | PROT_WRITE);
+    mprotect(indirect_symbol_bindings, (size_t)section->size, PROT_READ | PROT_WRITE);
   }
-  for (unsigned int i = 0; i < section->size / sizeof(void *); i++) {
+  uint32_t count = (uint32_t)(section->size / sizeof(void *));
+  for (uint32_t i = 0; i < count; i++) {
     uint32_t symtab_index = indirect_symbol_indices[i];
     if (symtab_index == INDIRECT_SYMBOL_ABS || symtab_index == INDIRECT_SYMBOL_LOCAL ||
         symtab_index == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
@@ -102,7 +105,7 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
     bool symbol_name_longer_than_1 = symbol_name[0] && symbol_name[1];
     struct rebindings_entry *cur = rebindings;
     while (cur) {
-      for (unsigned int j = 0; j < cur->rebindings_nel; j++) {
+      for (uint32_t j = 0; j < (uint32_t)cur->rebindings_nel; j++) {
         if (symbol_name_longer_than_1 &&
             strcmp(&symbol_name[1], cur->rebindings[j].name) == 0) {
           if (cur->rebindings[j].replaced != NULL &&
@@ -118,7 +121,7 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
   symbol_loop:;
   }
   if (isDataConst) {
-    mprotect(indirect_symbol_bindings, section->size, PROT_READ);
+    mprotect(indirect_symbol_bindings, (size_t)section->size, PROT_READ);
   }
 }
 
@@ -136,7 +139,7 @@ static void rebind_symbols_for_image(struct rebindings_entry *rebindings,
   struct dysymtab_command *dysymtab_cmd = NULL;
 
   uintptr_t cur = (uintptr_t)header + sizeof(mach_header_t);
-  for (unsigned int i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
+  for (uint32_t i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
     cur_seg_cmd = (segment_command_t *)cur;
     if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH_DEPENDENT) {
       if (strcmp(cur_seg_cmd->segname, SEG_LINKEDIT) == 0) {
@@ -154,20 +157,20 @@ static void rebind_symbols_for_image(struct rebindings_entry *rebindings,
     return;
   }
 
-  uintptr_t linkedit_base = (uintptr_t)slide + linkedit_segment->vmaddr - linkedit_segment->fileoff;
+  uintptr_t linkedit_base = (uintptr_t)slide + (uintptr_t)linkedit_segment->vmaddr - (uintptr_t)linkedit_segment->fileoff;
   nlist_t *symtab = (nlist_t *)(linkedit_base + symtab_cmd->symoff);
   char *strtab = (char *)(linkedit_base + symtab_cmd->stroff);
   uint32_t *indirect_symtab = (uint32_t *)(linkedit_base + dysymtab_cmd->indirectsymoff);
 
   cur = (uintptr_t)header + sizeof(mach_header_t);
-  for (unsigned int i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
+  for (uint32_t i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
     cur_seg_cmd = (segment_command_t *)cur;
     if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH_DEPENDENT) {
       if (strcmp(cur_seg_cmd->segname, SEG_DATA) != 0 &&
           strcmp(cur_seg_cmd->segname, SEG_DATA_CONST) != 0) {
         continue;
       }
-      for (unsigned int j = 0; j < cur_seg_cmd->nsects; j++) {
+      for (uint32_t j = 0; j < cur_seg_cmd->nsects; j++) {
         section_t *sect =
             (section_t *)(cur + sizeof(segment_command_t)) + j;
         if ((sect->flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS) {

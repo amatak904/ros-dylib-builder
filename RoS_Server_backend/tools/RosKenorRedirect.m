@@ -54,15 +54,11 @@ static const uint16_t kLocalTcpPort = 19000;
 @end
 
 // Original function pointers populated by fishhook
-static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
-static OSStatus (*orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
-static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
 static int (*orig_curl_easy_setopt)(void *, int, ...) = NULL;
 static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(
     CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) = NULL;
 
 static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    int (*real_connect)(int, const struct sockaddr *, socklen_t) = orig_connect ? orig_connect : connect;
     if (addr && addr->sa_family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
         if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
@@ -74,23 +70,23 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
                 hints.ai_family = AF_INET;
                 hints.ai_socktype = SOCK_STREAM;
                 if (getaddrinfo(kTunnelDomain, "443", &hints, &res) == 0 && res != NULL) {
-                    int rc = real_connect(sockfd, res->ai_addr, res->ai_addrlen);
+                    int rc = connect(sockfd, res->ai_addr, res->ai_addrlen);
                     freeaddrinfo(res);
                     return rc;
                 }
                 struct sockaddr_in fallback = *in_addr;
                 fallback.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 fallback.sin_port = htons(kLocalHttpsPort);
-                return real_connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
+                return connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
             } else if (port == 19000) {
                 struct sockaddr_in tcp_gw = *in_addr;
                 tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 tcp_gw.sin_port = htons(kLocalTcpPort);
-                return real_connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
+                return connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
             }
         }
     }
-    return real_connect(sockfd, addr, addrlen);
+    return connect(sockfd, addr, addrlen);
 }
 
 static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *result) {
@@ -154,18 +150,24 @@ static int hooked_curl_easy_setopt(void *curl, int option, ...) {
 
 static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
     CFAllocatorRef alloc, CFStringRef requestMethod, CFURLRef url, CFStringRef httpVersion) {
-    CFHTTPMessageRef (*real_create)(CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) =
-        orig_CFHTTPMessageCreateRequest ? orig_CFHTTPMessageCreateRequest : CFHTTPMessageCreateRequest;
+    CFURLRef targetURL = url;
     if (url != NULL) {
         @autoreleasepool {
             NSURL *nsURL = (__bridge NSURL *)url;
             NSURL *rewritten = [RosKenorRedirectProtocol rewrittenURLForURL:nsURL];
             if (rewritten != nil) {
-                return real_create(alloc, requestMethod, (__bridge CFURLRef)rewritten, httpVersion);
+                targetURL = (__bridge CFURLRef)rewritten;
+                if (orig_CFHTTPMessageCreateRequest) {
+                    return orig_CFHTTPMessageCreateRequest(alloc, requestMethod, targetURL, httpVersion);
+                }
+                return CFHTTPMessageCreateRequest(alloc, requestMethod, targetURL, httpVersion);
             }
         }
     }
-    return real_create(alloc, requestMethod, url, httpVersion);
+    if (orig_CFHTTPMessageCreateRequest) {
+        return orig_CFHTTPMessageCreateRequest(alloc, requestMethod, targetURL, httpVersion);
+    }
+    return CFHTTPMessageCreateRequest(alloc, requestMethod, targetURL, httpVersion);
 }
 
 DYLD_INTERPOSE(hooked_connect, connect)
@@ -180,9 +182,6 @@ DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
         struct rebinding rebindings[] = {
             {"curl_easy_setopt", (void *)hooked_curl_easy_setopt, (void **)&orig_curl_easy_setopt},
             {"CFHTTPMessageCreateRequest", (void *)hooked_CFHTTPMessageCreateRequest, (void **)&orig_CFHTTPMessageCreateRequest},
-            {"connect", (void *)hooked_connect, (void **)&orig_connect},
-            {"SecTrustEvaluate", (void *)hooked_SecTrustEvaluate, (void **)&orig_SecTrustEvaluate},
-            {"SecTrustEvaluateWithError", (void *)hooked_SecTrustEvaluateWithError, (void **)&orig_SecTrustEvaluateWithError},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
 
