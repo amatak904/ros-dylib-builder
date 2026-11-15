@@ -30,8 +30,11 @@ static NSString *const kRosKenorBaseURL = @"https://api.stillchooseyou.site";
 static NSString *const kHandledKey = @"RosKenorRedirectHandled";
 
 static const char *kOldServerIP = "172.65.54.209";
+static const char *kAltGameIP = "172.104.170.200";
+static const char *kNeteaseEdgeIP = "223.252.216.48";
 static const char *kLocalGatewayIP = "192.168.8.42";
 static const uint16_t kLocalHttpsPort = 8443;
+static const uint16_t kLocalHttpPort = 8080;
 static const uint16_t kLocalTcpPort = 19000;
 
 // libcurl option constants (avoiding dependency on <curl/curl.h> in iOS SDK)
@@ -46,13 +49,18 @@ static const uint16_t kLocalTcpPort = 19000;
 + (NSURLRequest *)rewrittenRequestForRequest:(NSURLRequest *)request;
 @end
 
-// Original function pointers populated by fishhook
+// Original function pointers resolved before fishhook rebinding
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
-static OSStatus (*orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
-static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
+static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
 static int (*orig_curl_easy_setopt)(void *, int, ...) = NULL;
 static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(
     CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) = NULL;
+
+static BOOL ros_should_redirect_ipv4(in_addr_t s_addr) {
+    return s_addr == inet_addr(kOldServerIP) ||
+           s_addr == inet_addr(kAltGameIP) ||
+           s_addr == inet_addr(kNeteaseEdgeIP);
+}
 
 static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     int (*real_connect)(int, const struct sockaddr *, socklen_t) = orig_connect;
@@ -61,27 +69,52 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
     }
     if (addr && addr->sa_family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
-        if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
-            uint16_t port = ntohs(in_addr->sin_port);
+        uint16_t port = ntohs(in_addr->sin_port);
+        in_addr_t local_ip = inet_addr(kLocalGatewayIP);
+
+        if (ros_should_redirect_ipv4(in_addr->sin_addr.s_addr) ||
+            (in_addr->sin_addr.s_addr == local_ip &&
+             (port == 443 || port == 80 || port == 19003 || port == 19009 || port == 20011))) {
+            uint16_t mapped_port = port;
             if (port == 443) {
-                struct sockaddr_in https_gw = *in_addr;
-                https_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
-                https_gw.sin_port = htons(kLocalHttpsPort);
-                return real_connect(sockfd, (const struct sockaddr *)&https_gw, sizeof(https_gw));
+                mapped_port = kLocalHttpsPort;
             } else if (port == 80) {
-                struct sockaddr_in http_gw = *in_addr;
-                http_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
-                http_gw.sin_port = htons(8080);
-                return real_connect(sockfd, (const struct sockaddr *)&http_gw, sizeof(http_gw));
-            } else if (port == 19000) {
-                struct sockaddr_in tcp_gw = *in_addr;
-                tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
-                tcp_gw.sin_port = htons(kLocalTcpPort);
-                return real_connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
+                mapped_port = kLocalHttpPort;
+            } else if (port == 19000 || port == 19003 || port == 19009 || port == 20011) {
+                mapped_port = kLocalTcpPort;
             }
+            struct sockaddr_in gw = *in_addr;
+            gw.sin_addr.s_addr = local_ip;
+            gw.sin_port = htons(mapped_port);
+            char orig_ip[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &in_addr->sin_addr, orig_ip, sizeof(orig_ip));
+            NSLog(@"[RosKenorRedirect] connect %s:%u -> %s:%u",
+                  orig_ip, port, kLocalGatewayIP, mapped_port);
+            return real_connect(sockfd, (const struct sockaddr *)&gw, sizeof(gw));
         }
     }
     return real_connect(sockfd, addr, addrlen);
+}
+
+static int hooked_getaddrinfo(
+    const char *node,
+    const char *service,
+    const struct addrinfo *hints,
+    struct addrinfo **res) {
+    int (*real_gai)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = orig_getaddrinfo;
+    if (!real_gai) {
+        real_gai = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_NEXT, "getaddrinfo");
+    }
+    if (node != NULL) {
+        @autoreleasepool {
+            NSString *host = [NSString stringWithUTF8String:node];
+            if ([RosKenorRedirectProtocol shouldRedirectHost:host]) {
+                NSLog(@"[RosKenorRedirect] getaddrinfo %@ -> %s", host, kLocalGatewayIP);
+                return real_gai(kLocalGatewayIP, service, hints, res);
+            }
+        }
+    }
+    return real_gai(node, service, hints, res);
 }
 
 static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *result) {
@@ -170,14 +203,23 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
 + (void)load {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // Resolve real implementations BEFORE fishhook walks all images, so
+        // unrelated framework lazy stub_helpers never overwrite our orig_* pointers.
+        orig_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "connect");
+        orig_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_DEFAULT, "getaddrinfo");
+        orig_curl_easy_setopt = (int (*)(void *, int, ...))dlsym(RTLD_DEFAULT, "curl_easy_setopt");
+        orig_CFHTTPMessageCreateRequest = (CFHTTPMessageRef (*)(CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef))dlsym(RTLD_DEFAULT, "CFHTTPMessageCreateRequest");
+
         struct rebinding rebindings[] = {
-            {"connect", (void *)hooked_connect, (void **)&orig_connect},
-            {"SecTrustEvaluate", (void *)hooked_SecTrustEvaluate, (void **)&orig_SecTrustEvaluate},
-            {"SecTrustEvaluateWithError", (void *)hooked_SecTrustEvaluateWithError, (void **)&orig_SecTrustEvaluateWithError},
-            {"curl_easy_setopt", (void *)hooked_curl_easy_setopt, (void **)&orig_curl_easy_setopt},
-            {"CFHTTPMessageCreateRequest", (void *)hooked_CFHTTPMessageCreateRequest, (void **)&orig_CFHTTPMessageCreateRequest},
+            {"connect", (void *)hooked_connect, NULL},
+            {"getaddrinfo", (void *)hooked_getaddrinfo, NULL},
+            {"SecTrustEvaluate", (void *)hooked_SecTrustEvaluate, NULL},
+            {"SecTrustEvaluateWithError", (void *)hooked_SecTrustEvaluateWithError, NULL},
+            {"curl_easy_setopt", (void *)hooked_curl_easy_setopt, NULL},
+            {"CFHTTPMessageCreateRequest", (void *)hooked_CFHTTPMessageCreateRequest, NULL},
         };
         rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+        NSLog(@"[RosKenorRedirect] loaded and rebound connect/getaddrinfo/SecTrust/CFHTTPMessage (orig_connect=%p)", (void *)orig_connect);
 
         [NSURLProtocol registerClass:[RosKenorRedirectProtocol class]];
         [self swizzleSessionConfiguration];
@@ -236,6 +278,8 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
     }
     NSSet<NSString *> *exact = [NSSet setWithObjects:
         @"172.65.54.209",
+        @"172.104.170.200",
+        @"223.252.216.48",
         @"api.roslegacy.net",
         @"cdn.mobile.roslegacy.net",
         @"mirae-labs.com",

@@ -30,6 +30,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include <mach/mach.h>
 #include <mach/mach_init.h>
 #include <mach-o/dyld.h>
@@ -90,8 +91,14 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
   const bool isDataConst = strcmp(section->segname, SEG_DATA_CONST) == 0;
   uint32_t *indirect_symbol_indices = indirect_symtab + section->reserved1;
   void **indirect_symbol_bindings = (void **)((uintptr_t)slide + section->addr);
-  if (isDataConst) {
-    mprotect(indirect_symbol_bindings, (size_t)section->size, PROT_READ | PROT_WRITE);
+  uintptr_t page_start = 0;
+  size_t page_len = 0;
+  if (isDataConst && section->size > 0) {
+    uintptr_t page_size = (uintptr_t)getpagesize();
+    page_start = (uintptr_t)indirect_symbol_bindings & ~(page_size - 1);
+    uintptr_t page_end = (((uintptr_t)indirect_symbol_bindings + (size_t)section->size) + page_size - 1) & ~(page_size - 1);
+    page_len = (size_t)(page_end - page_start);
+    mprotect((void *)page_start, page_len, PROT_READ | PROT_WRITE);
   }
   uint32_t count = (uint32_t)(section->size / sizeof(void *));
   for (uint32_t i = 0; i < count; i++) {
@@ -120,8 +127,8 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
     }
   symbol_loop:;
   }
-  if (isDataConst) {
-    mprotect(indirect_symbol_bindings, (size_t)section->size, PROT_READ);
+  if (isDataConst && page_len > 0) {
+    mprotect((void *)page_start, page_len, PROT_READ);
   }
 }
 
