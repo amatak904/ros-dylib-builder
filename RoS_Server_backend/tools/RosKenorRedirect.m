@@ -39,12 +39,6 @@ static const uint16_t kLocalTcpPort = 19000;
 #define ROS_CURLOPT_SSL_VERIFYHOST 81
 #define ROS_CURLOPT_URL 10002
 
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { const void *replacement; const void *replacee; } \
-    _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
-        (const void *)(unsigned long)&_replacement, (const void *)(unsigned long)&_replacee \
-    };
-
 @interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *dataTask;
 + (BOOL)shouldRedirectHost:(NSString *)host;
@@ -53,11 +47,18 @@ static const uint16_t kLocalTcpPort = 19000;
 @end
 
 // Original function pointers populated by fishhook
+static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+static OSStatus (*orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
+static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
 static int (*orig_curl_easy_setopt)(void *, int, ...) = NULL;
 static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(
     CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) = NULL;
 
 static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    int (*real_connect)(int, const struct sockaddr *, socklen_t) = orig_connect;
+    if (!real_connect) {
+        real_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_NEXT, "connect");
+    }
     if (addr && addr->sa_family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
         if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
@@ -66,16 +67,21 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
                 struct sockaddr_in https_gw = *in_addr;
                 https_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 https_gw.sin_port = htons(kLocalHttpsPort);
-                return connect(sockfd, (const struct sockaddr *)&https_gw, sizeof(https_gw));
+                return real_connect(sockfd, (const struct sockaddr *)&https_gw, sizeof(https_gw));
+            } else if (port == 80) {
+                struct sockaddr_in http_gw = *in_addr;
+                http_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
+                http_gw.sin_port = htons(8080);
+                return real_connect(sockfd, (const struct sockaddr *)&http_gw, sizeof(http_gw));
             } else if (port == 19000) {
                 struct sockaddr_in tcp_gw = *in_addr;
                 tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 tcp_gw.sin_port = htons(kLocalTcpPort);
-                return connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
+                return real_connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
             }
         }
     }
-    return connect(sockfd, addr, addrlen);
+    return real_connect(sockfd, addr, addrlen);
 }
 
 static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *result) {
@@ -159,16 +165,15 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
     return CFHTTPMessageCreateRequest(alloc, requestMethod, targetURL, httpVersion);
 }
 
-DYLD_INTERPOSE(hooked_connect, connect)
-DYLD_INTERPOSE(hooked_SecTrustEvaluate, SecTrustEvaluate)
-DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
-
 @implementation RosKenorRedirectProtocol
 
 + (void)load {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         struct rebinding rebindings[] = {
+            {"connect", (void *)hooked_connect, (void **)&orig_connect},
+            {"SecTrustEvaluate", (void *)hooked_SecTrustEvaluate, (void **)&orig_SecTrustEvaluate},
+            {"SecTrustEvaluateWithError", (void *)hooked_SecTrustEvaluateWithError, (void **)&orig_SecTrustEvaluateWithError},
             {"curl_easy_setopt", (void *)hooked_curl_easy_setopt, (void **)&orig_curl_easy_setopt},
             {"CFHTTPMessageCreateRequest", (void *)hooked_CFHTTPMessageCreateRequest, (void **)&orig_CFHTTPMessageCreateRequest},
         };
