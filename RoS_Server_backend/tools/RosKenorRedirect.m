@@ -1,22 +1,30 @@
 // RosKenorRedirect.m
-// Combined NSURLProtocol (NSURLConnection + NSURLSession) and BSD connect()
-// socket interceptor for Ros Kenor.
+// Combined NSURLProtocol (NSURLConnection + NSURLSession), CFNetwork,
+// libcurl (curl_easy_setopt via fishhook), and BSD connect() + SecTrust
+// interceptor for Rules of Survival (Ros Kenor).
 //
 // Compile on macOS with Xcode CLI tools:
 //   clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//     -miphoneos-version-min=12.0 -shared -fobjc-arc \
-//     -framework Foundation -framework WebKit \
+//     -miphoneos-version-min=12.0 -shared -fobjc-arc -Wno-deprecated-declarations \
+//     -framework Foundation -framework WebKit -framework Security -framework CFNetwork \
 //     -install_name @executable_path/Frameworks/RosKenorRedirect.dylib \
-//     -o RosKenorRedirect.dylib RoS_Server_backend/tools/RosKenorRedirect.m
+//     -o RosKenorRedirect.dylib \
+//     RoS_Server_backend/tools/RosKenorRedirect.m RoS_Server_backend/tools/fishhook.c
 
+#import <CFNetwork/CFNetwork.h>
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #import <objc/runtime.h>
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+
+#include "fishhook.h"
 
 static NSString *const kRosKenorBaseURL = @"https://api.stillchooseyou.site";
 static NSString *const kHandledKey = @"RosKenorRedirectHandled";
@@ -27,13 +35,34 @@ static const char *kLocalGatewayIP = "192.168.8.42";
 static const uint16_t kLocalHttpsPort = 8443;
 static const uint16_t kLocalTcpPort = 19000;
 
+// libcurl option constants (avoiding dependency on <curl/curl.h> in iOS SDK)
+#define ROS_CURLOPT_SSL_VERIFYPEER 64
+#define ROS_CURLOPT_SSL_VERIFYHOST 81
+#define ROS_CURLOPT_URL 10002
+
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { const void *replacement; const void *replacee; } \
     _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
         (const void *)(unsigned long)&_replacement, (const void *)(unsigned long)&_replacee \
     };
 
+@interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSURLSessionDataTask *dataTask;
++ (BOOL)shouldRedirectHost:(NSString *)host;
++ (NSURL *)rewrittenURLForURL:(NSURL *)url;
++ (NSURLRequest *)rewrittenRequestForRequest:(NSURLRequest *)request;
+@end
+
+// Original function pointers populated by fishhook
+static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+static OSStatus (*orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
+static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
+static int (*orig_curl_easy_setopt)(void *, int, ...) = NULL;
+static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(
+    CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) = NULL;
+
 static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    int (*real_connect)(int, const struct sockaddr *, socklen_t) = orig_connect ? orig_connect : connect;
     if (addr && addr->sa_family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
         if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
@@ -45,26 +74,27 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
                 hints.ai_family = AF_INET;
                 hints.ai_socktype = SOCK_STREAM;
                 if (getaddrinfo(kTunnelDomain, "443", &hints, &res) == 0 && res != NULL) {
-                    int rc = connect(sockfd, res->ai_addr, res->ai_addrlen);
+                    int rc = real_connect(sockfd, res->ai_addr, res->ai_addrlen);
                     freeaddrinfo(res);
                     return rc;
                 }
                 struct sockaddr_in fallback = *in_addr;
                 fallback.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 fallback.sin_port = htons(kLocalHttpsPort);
-                return connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
+                return real_connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
             } else if (port == 19000) {
                 struct sockaddr_in tcp_gw = *in_addr;
                 tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
                 tcp_gw.sin_port = htons(kLocalTcpPort);
-                return connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
+                return real_connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
             }
         }
     }
-    return connect(sockfd, addr, addrlen);
+    return real_connect(sockfd, addr, addrlen);
 }
 
 static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *result) {
+    (void)trust;
     if (result) {
         *result = kSecTrustResultProceed;
     }
@@ -72,25 +102,94 @@ static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *r
 }
 
 static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust, CFErrorRef *error) {
+    (void)trust;
     if (error) {
         *error = NULL;
     }
     return true;
 }
 
+static int hooked_curl_easy_setopt(void *curl, int option, ...) {
+    int (*real_setopt)(void *, int, ...) = orig_curl_easy_setopt;
+    if (!real_setopt) {
+        real_setopt = (int (*)(void *, int, ...))dlsym(RTLD_NEXT, "curl_easy_setopt");
+    }
+    if (!real_setopt) {
+        return 0;
+    }
+
+    va_list ap;
+    va_start(ap, option);
+
+    if (option == ROS_CURLOPT_URL) {
+        const char *raw_url = va_arg(ap, const char *);
+        va_end(ap);
+        if (raw_url != NULL) {
+            @autoreleasepool {
+                NSString *urlStr = [NSString stringWithUTF8String:raw_url];
+                NSURL *parsed = urlStr ? [NSURL URLWithString:urlStr] : nil;
+                NSURL *rewritten = parsed ? [RosKenorRedirectProtocol rewrittenURLForURL:parsed] : nil;
+                if (rewritten != nil) {
+                    const char *new_cstr = rewritten.absoluteString.UTF8String;
+                    int rc = real_setopt(curl, option, new_cstr);
+                    real_setopt(curl, ROS_CURLOPT_SSL_VERIFYPEER, 0L);
+                    real_setopt(curl, ROS_CURLOPT_SSL_VERIFYHOST, 0L);
+                    return rc;
+                }
+            }
+        }
+        return real_setopt(curl, option, raw_url);
+    }
+
+    if (option == ROS_CURLOPT_SSL_VERIFYPEER || option == ROS_CURLOPT_SSL_VERIFYHOST) {
+        (void)va_arg(ap, long);
+        va_end(ap);
+        return real_setopt(curl, option, 0L);
+    }
+
+    uintptr_t arg = va_arg(ap, uintptr_t);
+    va_end(ap);
+    return real_setopt(curl, option, arg);
+}
+
+static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
+    CFAllocatorRef alloc, CFStringRef requestMethod, CFURLRef url, CFStringRef httpVersion) {
+    CFHTTPMessageRef (*real_create)(CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) =
+        orig_CFHTTPMessageCreateRequest ? orig_CFHTTPMessageCreateRequest : CFHTTPMessageCreateRequest;
+    if (url != NULL) {
+        @autoreleasepool {
+            NSURL *nsURL = (__bridge NSURL *)url;
+            NSURL *rewritten = [RosKenorRedirectProtocol rewrittenURLForURL:nsURL];
+            if (rewritten != nil) {
+                return real_create(alloc, requestMethod, (__bridge CFURLRef)rewritten, httpVersion);
+            }
+        }
+    }
+    return real_create(alloc, requestMethod, url, httpVersion);
+}
+
 DYLD_INTERPOSE(hooked_connect, connect)
 DYLD_INTERPOSE(hooked_SecTrustEvaluate, SecTrustEvaluate)
 DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
 
-@interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
-@property (nonatomic, strong) NSURLSessionDataTask *dataTask;
-@end
-
 @implementation RosKenorRedirectProtocol
 
 + (void)load {
-    [NSURLProtocol registerClass:[RosKenorRedirectProtocol class]];
-    [self swizzleSessionConfiguration];
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        struct rebinding rebindings[] = {
+            {"curl_easy_setopt", (void *)hooked_curl_easy_setopt, (void **)&orig_curl_easy_setopt},
+            {"CFHTTPMessageCreateRequest", (void *)hooked_CFHTTPMessageCreateRequest, (void **)&orig_CFHTTPMessageCreateRequest},
+            {"connect", (void *)hooked_connect, (void **)&orig_connect},
+            {"SecTrustEvaluate", (void *)hooked_SecTrustEvaluate, (void **)&orig_SecTrustEvaluate},
+            {"SecTrustEvaluateWithError", (void *)hooked_SecTrustEvaluateWithError, (void **)&orig_SecTrustEvaluateWithError},
+        };
+        rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+
+        [NSURLProtocol registerClass:[RosKenorRedirectProtocol class]];
+        [self swizzleSessionConfiguration];
+        [self swizzleURLSessionTasks];
+    });
 }
 
 + (void)swizzleSessionConfiguration {
@@ -110,27 +209,83 @@ DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
     method_setImplementation(orig, newIMP);
 }
 
++ (void)swizzleURLSessionTasks {
+    Class cls = [NSURLSession class];
+
+    Method reqMethod = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
+    if (reqMethod) {
+        IMP origReqIMP = method_getImplementation(reqMethod);
+        IMP newReqIMP = imp_implementationWithBlock(^NSURLSessionDataTask *(id selfObj, NSURLRequest *req) {
+            NSURLRequest *rewritten = [RosKenorRedirectProtocol rewrittenRequestForRequest:req];
+            return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))origReqIMP)(
+                selfObj, @selector(dataTaskWithRequest:), rewritten ?: req);
+        });
+        method_setImplementation(reqMethod, newReqIMP);
+    }
+
+    Method urlMethod = class_getInstanceMethod(cls, @selector(dataTaskWithURL:));
+    if (urlMethod) {
+        IMP origURLIMP = method_getImplementation(urlMethod);
+        IMP newURLIMP = imp_implementationWithBlock(^NSURLSessionDataTask *(id selfObj, NSURL *url) {
+            NSURL *rewritten = [RosKenorRedirectProtocol rewrittenURLForURL:url];
+            return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *))origURLIMP)(
+                selfObj, @selector(dataTaskWithURL:), rewritten ?: url);
+        });
+        method_setImplementation(urlMethod, newURLIMP);
+    }
+}
+
 + (BOOL)shouldRedirectHost:(NSString *)host {
-    if (!host) return NO;
+    if (!host || host.length == 0) return NO;
     NSString *lower = host.lowercaseString;
+    if ([lower isEqualToString:@"api.stillchooseyou.site"]) {
+        return NO;
+    }
     NSSet<NSString *> *exact = [NSSet setWithObjects:
         @"172.65.54.209",
         @"api.roslegacy.net",
         @"cdn.mobile.roslegacy.net",
         @"mirae-labs.com",
         @"topup.mythgames.net",
-        @"mgbsdknaeast.matrix.easebar.com",
-        @"data-detect.nie.easebar.com",
-        @"unisdk.proxima.nie.easebar.com",
-        @"unisdk.update.easebar.com",
-        @"appdump.nie.easebar.com",
-        @"applog.matrix.easebar.com",
+        @"easebar.com",
+        @"netease.com",
+        @"163.com",
         nil];
     if ([exact containsObject:lower]) return YES;
     return [lower hasSuffix:@".roslegacy.net"] ||
            [lower hasSuffix:@".mirae-labs.com"] ||
            [lower hasSuffix:@".easebar.com"] ||
-           [lower hasSuffix:@".cc.163.com"];
+           [lower hasSuffix:@".netease.com"] ||
+           [lower hasSuffix:@".163.com"];
+}
+
++ (NSURL *)rewrittenURLForURL:(NSURL *)url {
+    if (!url || ![self shouldRedirectHost:url.host]) {
+        return nil;
+    }
+    NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    NSURLComponents *target = [NSURLComponents componentsWithString:kRosKenorBaseURL];
+    if (!comps || !target) {
+        return nil;
+    }
+    comps.scheme = target.scheme;
+    comps.host = target.host;
+    comps.port = target.port;
+    if ([url.host.lowercaseString containsString:@"mirae-labs.com"] &&
+        [comps.path isEqualToString:@"/register"]) {
+        comps.path = @"/login";
+    }
+    return comps.URL;
+}
+
++ (NSURLRequest *)rewrittenRequestForRequest:(NSURLRequest *)request {
+    NSURL *rewritten = [self rewrittenURLForURL:request.URL];
+    if (!rewritten) {
+        return nil;
+    }
+    NSMutableURLRequest *mutableReq = [request mutableCopy];
+    mutableReq.URL = rewritten;
+    return mutableReq;
 }
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
@@ -148,16 +303,10 @@ DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
     NSMutableURLRequest *mutableReq = [self.request mutableCopy];
     [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:mutableReq];
 
-    NSURLComponents *comps = [NSURLComponents componentsWithURL:mutableReq.URL resolvingAgainstBaseURL:NO];
-    NSURLComponents *target = [NSURLComponents componentsWithString:kRosKenorBaseURL];
-    comps.scheme = target.scheme;
-    comps.host = target.host;
-    comps.port = target.port;
-    if ([mutableReq.URL.host.lowercaseString containsString:@"mirae-labs.com"] &&
-        [comps.path isEqualToString:@"/register"]) {
-        comps.path = @"/login";
+    NSURL *rewritten = [RosKenorRedirectProtocol rewrittenURLForURL:mutableReq.URL];
+    if (rewritten) {
+        mutableReq.URL = rewritten;
     }
-    mutableReq.URL = comps.URL;
 
     NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]
                                                           delegate:self
