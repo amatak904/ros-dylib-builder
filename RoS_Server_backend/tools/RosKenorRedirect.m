@@ -13,13 +13,16 @@
 #import <Security/Security.h>
 #import <objc/runtime.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <string.h>
 #include <sys/socket.h>
 
-static NSString *const kRosKenorBaseURL = @"https://arts-biotechnology-narrow-gage.trycloudflare.com";
+static NSString *const kRosKenorBaseURL = @"https://api.stillchooseyou.site";
 static NSString *const kHandledKey = @"RosKenorRedirectHandled";
 
 static const char *kOldServerIP = "172.65.54.209";
+static const char *kTunnelDomain = "api.stillchooseyou.site";
 static const char *kLocalGatewayIP = "192.168.8.42";
 static const uint16_t kLocalHttpsPort = 8443;
 static const uint16_t kLocalTcpPort = 19000;
@@ -34,15 +37,28 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
     if (addr && addr->sa_family == AF_INET && addrlen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
         if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
-            struct sockaddr_in rewritten = *in_addr;
             uint16_t port = ntohs(in_addr->sin_port);
-            rewritten.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
             if (port == 443) {
-                rewritten.sin_port = htons(kLocalHttpsPort);
+                struct addrinfo hints;
+                struct addrinfo *res = NULL;
+                memset(&hints, 0, sizeof(hints));
+                hints.ai_family = AF_INET;
+                hints.ai_socktype = SOCK_STREAM;
+                if (getaddrinfo(kTunnelDomain, "443", &hints, &res) == 0 && res != NULL) {
+                    int rc = connect(sockfd, res->ai_addr, res->ai_addrlen);
+                    freeaddrinfo(res);
+                    return rc;
+                }
+                struct sockaddr_in fallback = *in_addr;
+                fallback.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
+                fallback.sin_port = htons(kLocalHttpsPort);
+                return connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
             } else if (port == 19000) {
-                rewritten.sin_port = htons(kLocalTcpPort);
+                struct sockaddr_in tcp_gw = *in_addr;
+                tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
+                tcp_gw.sin_port = htons(kLocalTcpPort);
+                return connect(sockfd, (const struct sockaddr *)&tcp_gw, sizeof(tcp_gw));
             }
-            return connect(sockfd, (const struct sockaddr *)&rewritten, sizeof(rewritten));
         }
     }
     return connect(sockfd, addr, addrlen);
