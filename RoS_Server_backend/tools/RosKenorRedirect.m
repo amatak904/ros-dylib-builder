@@ -30,7 +30,6 @@ static NSString *const kRosKenorBaseURL = @"https://api.stillchooseyou.site";
 static NSString *const kHandledKey = @"RosKenorRedirectHandled";
 
 static const char *kOldServerIP = "172.65.54.209";
-static const char *kTunnelDomain = "api.stillchooseyou.site";
 static const char *kLocalGatewayIP = "192.168.8.42";
 static const uint16_t kLocalHttpsPort = 8443;
 static const uint16_t kLocalTcpPort = 19000;
@@ -64,20 +63,10 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
         if (in_addr->sin_addr.s_addr == inet_addr(kOldServerIP)) {
             uint16_t port = ntohs(in_addr->sin_port);
             if (port == 443) {
-                struct addrinfo hints;
-                struct addrinfo *res = NULL;
-                memset(&hints, 0, sizeof(hints));
-                hints.ai_family = AF_INET;
-                hints.ai_socktype = SOCK_STREAM;
-                if (getaddrinfo(kTunnelDomain, "443", &hints, &res) == 0 && res != NULL) {
-                    int rc = connect(sockfd, res->ai_addr, res->ai_addrlen);
-                    freeaddrinfo(res);
-                    return rc;
-                }
-                struct sockaddr_in fallback = *in_addr;
-                fallback.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
-                fallback.sin_port = htons(kLocalHttpsPort);
-                return connect(sockfd, (const struct sockaddr *)&fallback, sizeof(fallback));
+                struct sockaddr_in https_gw = *in_addr;
+                https_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
+                https_gw.sin_port = htons(kLocalHttpsPort);
+                return connect(sockfd, (const struct sockaddr *)&https_gw, sizeof(https_gw));
             } else if (port == 19000) {
                 struct sockaddr_in tcp_gw = *in_addr;
                 tcp_gw.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
