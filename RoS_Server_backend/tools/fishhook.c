@@ -213,7 +213,7 @@ int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) {
   } else {
     uint32_t c = _dyld_image_count();
     for (uint32_t i = 0; i < c; i++) {
-      _rebind_symbols_for_image(_dyld_get_image_header(i), _dyld_get_image_slide(i));
+      _rebind_symbols_for_image(_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i));
     }
   }
   return retval;
