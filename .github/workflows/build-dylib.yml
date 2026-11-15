@@ -19,8 +19,8 @@ jobs:
           clang -arch arm64 \
             -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
             -miphoneos-version-min=12.0 \
-            -shared -fobjc-arc \
-            -framework Foundation -framework WebKit \
+            -shared -fobjc-arc -Wno-deprecated-declarations \
+            -framework Foundation -framework WebKit -framework Security \
             -install_name @executable_path/Frameworks/RosKenorRedirect.dylib \
             -o RosKenorRedirect.dylib \
             RoS_Server_backend/tools/RosKenorRedirect.m

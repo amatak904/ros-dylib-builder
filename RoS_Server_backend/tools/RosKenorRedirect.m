@@ -10,6 +10,7 @@
 //     -o RosKenorRedirect.dylib RoS_Server_backend/tools/RosKenorRedirect.m
 
 #import <Foundation/Foundation.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -20,7 +21,7 @@ static NSString *const kHandledKey = @"RosKenorRedirectHandled";
 
 static const char *kOldServerIP = "172.65.54.209";
 static const char *kLocalGatewayIP = "192.168.8.42";
-static const uint16_t kLocalHttpPort = 8080;
+static const uint16_t kLocalHttpsPort = 8443;
 static const uint16_t kLocalTcpPort = 19000;
 
 #define DYLD_INTERPOSE(_replacement, _replacee) \
@@ -37,7 +38,7 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
             uint16_t port = ntohs(in_addr->sin_port);
             rewritten.sin_addr.s_addr = inet_addr(kLocalGatewayIP);
             if (port == 443) {
-                rewritten.sin_port = htons(kLocalHttpPort);
+                rewritten.sin_port = htons(kLocalHttpsPort);
             } else if (port == 19000) {
                 rewritten.sin_port = htons(kLocalTcpPort);
             }
@@ -47,7 +48,23 @@ static int hooked_connect(int sockfd, const struct sockaddr *addr, socklen_t add
     return connect(sockfd, addr, addrlen);
 }
 
+static OSStatus hooked_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *result) {
+    if (result) {
+        *result = kSecTrustResultProceed;
+    }
+    return errSecSuccess;
+}
+
+static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust, CFErrorRef *error) {
+    if (error) {
+        *error = NULL;
+    }
+    return true;
+}
+
 DYLD_INTERPOSE(hooked_connect, connect)
+DYLD_INTERPOSE(hooked_SecTrustEvaluate, SecTrustEvaluate)
+DYLD_INTERPOSE(hooked_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
 
 @interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *dataTask;
@@ -148,6 +165,19 @@ didReceiveResponse:(NSURLResponse *)response
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
     [self.client URLProtocol:self didLoadData:data];
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
+    if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust] &&
+        challenge.protectionSpace.serverTrust != NULL) {
+        completionHandler(NSURLSessionAuthChallengeUseCredential,
+                          [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust]);
+        return;
+    }
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
