@@ -1,0 +1,10 @@
+RoS_Client_patch/
+RoS_Client_payload/
+build_temp/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.ipa
+*.dylib
+RoS_Server_backend/logs/

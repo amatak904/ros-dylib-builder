@@ -1,0 +1,35 @@
+name: Build RosKenorRedirect.dylib (iOS arm64)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'RoS_Server_backend/tools/RosKenorRedirect.m'
+      - '.github/workflows/build-dylib.yml'
+
+jobs:
+  build-dylib:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile RosKenorRedirect.dylib (arm64 iphoneos)
+        run: |
+          clang -arch arm64 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -miphoneos-version-min=12.0 \
+            -shared -fobjc-arc \
+            -framework Foundation -framework WebKit \
+            -install_name @executable_path/Frameworks/RosKenorRedirect.dylib \
+            -o RosKenorRedirect.dylib \
+            RoS_Server_backend/tools/RosKenorRedirect.m
+          file RosKenorRedirect.dylib
+          otool -L RosKenorRedirect.dylib
+
+      - name: Upload RosKenorRedirect.dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RosKenorRedirect-dylib
+          path: RosKenorRedirect.dylib
+          if-no-files-found: error
