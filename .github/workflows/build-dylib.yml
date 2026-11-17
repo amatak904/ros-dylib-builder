@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-dylib:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - name: Checkout repository
