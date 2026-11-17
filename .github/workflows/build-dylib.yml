@@ -23,23 +23,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos + iPhoneOS SDK on Ubuntu
-        uses: beerpiss/theos-action@v1
-        with:
-          theos-dir: '${{ github.workspace }}/theos'
+      - name: Install Clang + LLD (Mach-O) and fetch iPhoneOS SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
 
       - name: Compile RosKenorRedirect.dylib (arm64 iphoneos)
-        env:
-          THEOS: ${{ github.workspace }}/theos
         run: |
-          make -C RoS_Server_backend/tools FINALPACKAGE=1
-          BUILT_DYLIB=$(find RoS_Server_backend/tools/.theos/obj -name "RosKenorRedirect.dylib" -type f | head -n 1)
-          test -n "$BUILT_DYLIB"
-          cp "$BUILT_DYLIB" RosKenorRedirect.dylib
-          if command -v "$THEOS/toolchain/linux/iphone/bin/install_name_tool" >/dev/null 2>&1; then
-            "$THEOS/toolchain/linux/iphone/bin/install_name_tool" -id @executable_path/Frameworks/RosKenorRedirect.dylib RosKenorRedirect.dylib
-          fi
+          SDK=$(ls -d /tmp/theos-sdks/iPhoneOS*.sdk | sort -V | tail -n 1)
+          echo "Using SDK: $SDK"
+          clang -c --target=arm64-apple-ios12.0 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=12.0 \
+            -fPIC -O2 \
+            RoS_Server_backend/tools/fishhook.c -o fishhook.o
+          clang -c --target=arm64-apple-ios12.0 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=12.0 \
+            -fobjc-arc -fobjc-runtime=ios-12.0 -Wno-deprecated-declarations \
+            -fPIC -O2 \
+            RoS_Server_backend/tools/RosKenorRedirect.m -o RosKenorRedirect.o
+          clang --target=arm64-apple-ios12.0 -fuse-ld=lld \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=12.0 \
+            -shared \
+            -F"$SDK/System/Library/Frameworks" \
+            -L"$SDK/usr/lib" \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
+            -lobjc \
+            -Wl,-install_name,@executable_path/Frameworks/RosKenorRedirect.dylib \
+            RosKenorRedirect.o fishhook.o \
+            -o RosKenorRedirect.dylib
           file RosKenorRedirect.dylib
+          llvm-objdump --macho --dylib-id --dylibs-used RosKenorRedirect.dylib
           ls -lh RosKenorRedirect.dylib
 
       - name: Upload RosKenorRedirect.dylib artifact
