@@ -10,9 +10,14 @@ on:
       - 'RoS_Server_backend/tools/fishhook.h'
       - '.github/workflows/build-dylib.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-dylib:
-    runs-on: macos-latest
+    runs-on: macos-14
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
