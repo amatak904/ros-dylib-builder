@@ -50,7 +50,7 @@ jobs:
             -shared \
             -F"$SDK/System/Library/Frameworks" \
             -L"$SDK/usr/lib" \
-            -framework Foundation -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
+            -framework Foundation -framework CoreFoundation -framework CoreGraphics -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
             -lobjc \
             -Wl,-install_name,@executable_path/Frameworks/RosKenorRedirect.dylib \
             RosKenorRedirect.o fishhook.o \

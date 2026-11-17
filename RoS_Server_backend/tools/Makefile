@@ -8,7 +8,7 @@ LIBRARY_NAME = RosKenorRedirect
 RosKenorRedirect_FILES = RosKenorRedirect.m fishhook.c
 RosKenorRedirect_CFLAGS = -Wno-deprecated-declarations
 RosKenorRedirect_OBJCFLAGS = -fobjc-arc -Wno-deprecated-declarations
-RosKenorRedirect_FRAMEWORKS = Foundation UIKit QuartzCore WebKit Security CFNetwork
+RosKenorRedirect_FRAMEWORKS = Foundation CoreFoundation CoreGraphics UIKit QuartzCore WebKit Security CFNetwork
 RosKenorRedirect_INSTALL_PATH = @executable_path/Frameworks
 RosKenorRedirect_LDFLAGS = -Wl,-install_name,@executable_path/Frameworks/RosKenorRedirect.dylib
 

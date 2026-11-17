@@ -906,8 +906,9 @@ static NSString *rk_read_provision_expiry(NSString **detailOut) {
     _modeSegment = [[UISegmentedControl alloc] initWithItems:@[@"SIGN IN", @"CREATE ACCOUNT"]];
     _modeSegment.selectedSegmentIndex = 0;
     _modeSegment.backgroundColor = [UIColor colorWithRed:7/255.0 green:13/255.0 blue:25/255.0 alpha:1.0];
-    if (@available(iOS 13.0, *)) {
-        _modeSegment.selectedSegmentTintColor = [UIColor colorWithRed:14/255.0 green:165/255.0 blue:233/255.0 alpha:1.0];
+    if ([_modeSegment respondsToSelector:@selector(setSelectedSegmentTintColor:)]) {
+        UIColor *segTint = [UIColor colorWithRed:14/255.0 green:165/255.0 blue:233/255.0 alpha:1.0];
+        ((void (*)(id, SEL, id))objc_msgSend)(_modeSegment, @selector(setSelectedSegmentTintColor:), segTint);
     }
     [_modeSegment setTitleTextAttributes:@{
         NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.68],
