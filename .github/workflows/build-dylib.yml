@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'RoS_Server_backend/tools/RosKenorRedirect.m'
+      - 'RoS_Server_backend/tools/ros_assets_data.h'
       - 'RoS_Server_backend/tools/fishhook.c'
       - 'RoS_Server_backend/tools/fishhook.h'
       - '.github/workflows/build-dylib.yml'
@@ -22,7 +23,7 @@ jobs:
             -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
             -miphoneos-version-min=12.0 \
             -shared -fobjc-arc -Wno-deprecated-declarations \
-            -framework Foundation -framework WebKit -framework Security -framework CFNetwork \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
             -install_name @executable_path/Frameworks/RosKenorRedirect.dylib \
             -o RosKenorRedirect.dylib \
             RoS_Server_backend/tools/RosKenorRedirect.m \
