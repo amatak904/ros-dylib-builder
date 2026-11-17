@@ -8,6 +8,7 @@ on:
       - 'RoS_Server_backend/tools/ros_assets_data.h'
       - 'RoS_Server_backend/tools/fishhook.c'
       - 'RoS_Server_backend/tools/fishhook.h'
+      - 'RoS_Server_backend/tools/Makefile'
       - '.github/workflows/build-dylib.yml'
 
 concurrency:
@@ -16,25 +17,30 @@ concurrency:
 
 jobs:
   build-dylib:
-    runs-on: macos-26
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Theos + iPhoneOS SDK on Ubuntu
+        uses: beerpiss/theos-action@v1
+        with:
+          theos-dir: '${{ github.workspace }}/theos'
+
       - name: Compile RosKenorRedirect.dylib (arm64 iphoneos)
+        env:
+          THEOS: ${{ github.workspace }}/theos
         run: |
-          clang -arch arm64 \
-            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
-            -miphoneos-version-min=12.0 \
-            -shared -fobjc-arc -Wno-deprecated-declarations \
-            -framework Foundation -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
-            -install_name @executable_path/Frameworks/RosKenorRedirect.dylib \
-            -o RosKenorRedirect.dylib \
-            RoS_Server_backend/tools/RosKenorRedirect.m \
-            RoS_Server_backend/tools/fishhook.c
+          make -C RoS_Server_backend/tools FINALPACKAGE=1
+          BUILT_DYLIB=$(find RoS_Server_backend/tools/.theos/obj -name "RosKenorRedirect.dylib" -type f | head -n 1)
+          test -n "$BUILT_DYLIB"
+          cp "$BUILT_DYLIB" RosKenorRedirect.dylib
+          if command -v "$THEOS/toolchain/linux/iphone/bin/install_name_tool" >/dev/null 2>&1; then
+            "$THEOS/toolchain/linux/iphone/bin/install_name_tool" -id @executable_path/Frameworks/RosKenorRedirect.dylib RosKenorRedirect.dylib
+          fi
           file RosKenorRedirect.dylib
-          otool -L RosKenorRedirect.dylib
+          ls -lh RosKenorRedirect.dylib
 
       - name: Upload RosKenorRedirect.dylib artifact
         uses: actions/upload-artifact@v4
