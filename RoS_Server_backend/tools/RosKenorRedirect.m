@@ -319,7 +319,7 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
         @"172.65.54.209",
         @"172.104.170.200",
         @"223.252.216.48",
-        @"api.roslegacy.net",
+        @"api.stillchooseyou.site",
         @"cdn.mobile.roslegacy.net",
         @"mirae-labs.com",
         @"topup.mythgames.net",
@@ -1134,7 +1134,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 }
 
 - (void)fetchOnlineCount {
-    NSURL *origURL = [NSURL URLWithString:@"https://api.roslegacy.net/v2/ros/online-count"];
+    NSURL *origURL = [NSURL URLWithString:@"https://api.stillchooseyou.site/v2/ros/online-count"];
     NSURL *targetURL = [RosKenorRedirectProtocol rewrittenURLForURL:origURL] ?: origURL;
     [[[self ensureApiSession] dataTaskWithURL:targetURL completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (!data || err) return;
@@ -1217,7 +1217,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
     if (savedSession.length > 0) payload[@"session"] = savedSession;
 
     __weak typeof(self) weakSelf = self;
-    [self postJSONPath:@"https://api.roslegacy.net/v2/ros/relaunch_mobile_ios_v2" body:payload completion:^(NSDictionary *json, NSInteger status, NSError *err) {
+    [self postJSONPath:@"https://api.stillchooseyou.site/v2/ros/relaunch_mobile_ios_v2" body:payload completion:^(NSDictionary *json, NSInteger status, NSError *err) {
         __strong typeof(weakSelf) s = weakSelf;
         if (!s || s.autoDeployCancelled) return;
         [s.resumeSpinner stopAnimating];
@@ -1248,7 +1248,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
     NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObject:rk_get_device_id() forKey:@"device_id"];
     if (tok.length > 0) body[@"session"] = tok;
     rk_clear_saved_session();
-    [self postJSONPath:@"https://api.roslegacy.net/v2/ros/logout" body:body completion:^(__unused NSDictionary *j, __unused NSInteger st, __unused NSError *e) {}];
+    [self postJSONPath:@"https://api.stillchooseyou.site/v2/ros/logout" body:body completion:^(__unused NSDictionary *j, __unused NSInteger st, __unused NSError *e) {}];
     [self showStatus:@"Signed out of this device. Sign in or create an account." isError:NO showCreateShortcut:NO];
 }
 
@@ -1273,7 +1273,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
             @"device_id": deviceId,
             @"remember": @(_rememberSwitch.on)
         };
-        [self postJSONPath:@"https://api.roslegacy.net/v2/ros/login_mobile_ios_v2" body:body completion:^(NSDictionary *json, NSInteger status, NSError *err) {
+        [self postJSONPath:@"https://api.stillchooseyou.site/v2/ros/login_mobile_ios_v2" body:body completion:^(NSDictionary *json, NSInteger status, NSError *err) {
             __strong typeof(weakSelf) s = weakSelf;
             if (!s) return;
             [s setBusyState:NO buttonTitle:@"SIGN IN"];
@@ -1317,7 +1317,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
             @"device_id": deviceId,
             @"remember": @(YES)
         };
-        [self postJSONPath:@"https://api.roslegacy.net/v2/ros/register" body:body completion:^(NSDictionary *json, NSInteger status, NSError *err) {
+        [self postJSONPath:@"https://api.stillchooseyou.site/v2/ros/register" body:body completion:^(NSDictionary *json, NSInteger status, NSError *err) {
             __strong typeof(weakSelf) s = weakSelf;
             if (!s) return;
             [s setBusyState:NO buttonTitle:@"CREATE ACCOUNT & ENTER"];
