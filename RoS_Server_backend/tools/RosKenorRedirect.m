@@ -658,7 +658,18 @@ static NSString *rk_read_provision_expiry(NSString **detailOut) {
     }
 
     // Off-screen compatibility bridges passed into RosLoginVC's native doDeploy:button:logout:
-    _hiddenErrBridge = [[UILabel alloc] initWithFrame:CGRectZero];
+#ifdef __cplusplus
+extern "C" {
+#endif
+int __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t build) {
+    (void)platform; (void)major; (void)minor; (void)build;
+    return 1;
+}
+#ifdef __cplusplus
+}
+#endif
+
+    _hiddenErrBridge = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 0, 0)];
     _hiddenErrBridge.hidden = YES;
     [self addSubview:_hiddenErrBridge];
 
@@ -928,7 +939,7 @@ static NSString *rk_read_provision_expiry(NSString **detailOut) {
     _rememberSwitch = [[UISwitch alloc] init];
     _rememberSwitch.on = YES;
     _rememberSwitch.onTintColor = [UIColor colorWithRed:14/255.0 green:165/255.0 blue:233/255.0 alpha:1.0];
-    _rememberSwitch.transform = CGAffineTransformMakeScale(0.82, 0.82);
+    _rememberSwitch.transform = CGAffineTransformMake(0.82, 0, 0, 0.82, 0, 0);
     UILabel *remLbl = [[UILabel alloc] init];
     remLbl.text = @"Remember this device (auto-login on reopen)";
     remLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
@@ -1028,7 +1039,7 @@ static NSString *rk_read_provision_expiry(NSString **detailOut) {
 }
 
 - (void)applyResponsiveOrientationConstraints {
-    BOOL wide = CGRectGetWidth(self.bounds) >= 620.0;
+    BOOL wide = self.bounds.size.width >= 620.0;
     NSInteger targetMode = wide ? 2 : 1;
     if (_appliedLayoutMode == targetMode && _layoutModeConstraints.count > 0) {
         return;
@@ -1351,7 +1362,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 - (void)onKeyboardChange:(NSNotification *)note {
     CGRect kb = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
     CGRect localKB = [self convertRect:kb fromView:nil];
-    CGFloat overlap = CGRectGetMaxY(_cardContainer.frame) - CGRectGetMinY(localKB);
+    CGFloat overlap = (_cardContainer.frame.origin.y + _cardContainer.frame.size.height) - localKB.origin.y;
     if (overlap > 0) {
         _scrollView.contentInset = UIEdgeInsetsMake(0, 0, overlap + 24.0, 0);
         [_scrollView setContentOffset:CGPointMake(0, MIN(overlap + 12.0, 180.0)) animated:YES];
@@ -1360,7 +1371,7 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 
 - (void)onKeyboardHide:(NSNotification *)note {
     _scrollView.contentInset = UIEdgeInsetsZero;
-    [_scrollView setContentOffset:CGPointZero animated:YES];
+    [_scrollView setContentOffset:CGPointMake(0, 0) animated:YES];
 }
 
 @end
