@@ -38,6 +38,17 @@ static const char *kAltGameIP = "172.104.170.200";
 static const char *kNeteaseEdgeIP = "223.252.216.48";
 static const char *kLocalGatewayIP = "192.168.8.42";
 static const uint16_t kLocalHttpsPort = 8443;
+#ifdef __cplusplus
+extern "C" {
+#endif
+int __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t build) {
+    (void)platform; (void)major; (void)minor; (void)build;
+    return 1;
+}
+#ifdef __cplusplus
+}
+#endif
+
 static const uint16_t kLocalHttpPort = 8080;
 static const uint16_t kLocalTcpPort = 19000;
 
@@ -658,17 +669,6 @@ static NSString *rk_read_provision_expiry(NSString **detailOut) {
     }
 
     // Off-screen compatibility bridges passed into RosLoginVC's native doDeploy:button:logout:
-#ifdef __cplusplus
-extern "C" {
-#endif
-int __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t build) {
-    (void)platform; (void)major; (void)minor; (void)build;
-    return 1;
-}
-#ifdef __cplusplus
-}
-#endif
-
     _hiddenErrBridge = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 0, 0)];
     _hiddenErrBridge.hidden = YES;
     [self addSubview:_hiddenErrBridge];
