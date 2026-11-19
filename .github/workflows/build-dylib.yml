@@ -52,6 +52,7 @@ jobs:
             -L"$SDK/usr/lib" \
             -framework Foundation -framework CoreFoundation -framework CoreGraphics -framework UIKit -framework QuartzCore -framework WebKit -framework Security -framework CFNetwork \
             -lobjc \
+            -Wl,-undefined,dynamic_lookup \
             -Wl,-install_name,@executable_path/Frameworks/RosKenorRedirect.dylib \
             RosKenorRedirect.o fishhook.o \
             -o RosKenorRedirect.dylib
