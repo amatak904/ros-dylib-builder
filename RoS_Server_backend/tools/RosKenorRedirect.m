@@ -56,6 +56,8 @@ static const uint16_t kLocalTcpPort = 19000;
 
 @interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *dataTask;
++ (BOOL)isPatchDownloadURL:(NSURL *)url;
++ (BOOL)shouldRedirectURL:(NSURL *)url;
 + (BOOL)shouldRedirectHost:(NSString *)host;
 + (NSURL *)rewrittenURLForURL:(NSURL *)url;
 + (NSURLRequest *)rewrittenRequestForRequest:(NSURLRequest *)request;
@@ -311,6 +313,23 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
     }
 }
 
++ (BOOL)isPatchDownloadURL:(NSURL *)url {
+    if (!url) return NO;
+    NSString *path = url.path.lowercaseString;
+    return [path hasSuffix:@".npk"] ||
+           [path hasSuffix:@".manifest.json"] ||
+           [path containsString:@"/patch/"] ||
+           [path hasPrefix:@"/ios/"];
+}
+
++ (BOOL)shouldRedirectURL:(NSURL *)url {
+    if (!url) return NO;
+    if ([self isPatchDownloadURL:url]) {
+        return YES;
+    }
+    return [self shouldRedirectHost:url.host];
+}
+
 + (BOOL)shouldRedirectHost:(NSString *)host {
     if (!host || host.length == 0) return NO;
     NSString *lower = host.lowercaseString;
@@ -338,9 +357,23 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
 }
 
 + (NSURL *)rewrittenURLForURL:(NSURL *)url {
-    if (!url || ![self shouldRedirectHost:url.host]) {
+    if (!url || ![self shouldRedirectURL:url]) {
         return nil;
     }
+
+    // High-speed LAN patch download fast-path:
+    // Route any NPK archive or iOS patch request directly to local LAN HTTP (192.168.8.42:8080)
+    // so game content downloads at maximum Gigabit Wi-Fi speed (50-100 MB/s).
+    if ([self isPatchDownloadURL:url]) {
+        NSURLComponents *lanComps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        if (lanComps) {
+            lanComps.scheme = @"http";
+            lanComps.host = [NSString stringWithUTF8String:kLocalGatewayIP];
+            lanComps.port = @(kLocalHttpPort);
+            return lanComps.URL;
+        }
+    }
+
     NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
     NSURLComponents *target = [NSURLComponents componentsWithString:kRosKenorBaseURL];
     if (!comps || !target) {
@@ -366,7 +399,7 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
     if ([NSURLProtocol propertyForKey:kHandledKey inRequest:request]) {
         return NO;
     }
-    return [self shouldRedirectHost:request.URL.host];
+    return [self shouldRedirectURL:request.URL];
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
