@@ -212,6 +212,7 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
 
 @interface RosKenorAuthController : NSObject
 + (void)installLoginOverlayHooks;
++ (void)installContentOverlayHooks;
 @end
 
 @implementation RosKenorRedirectProtocol
@@ -241,6 +242,7 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
         [self swizzleSessionConfiguration];
         [self swizzleURLSessionTasks];
         [RosKenorAuthController installLoginOverlayHooks];
+        [RosKenorAuthController installContentOverlayHooks];
     });
 }
 
@@ -1373,6 +1375,238 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 
 @end
 
+#pragma mark - Redesigned Ros Kenor Content Downloader Overlay
+
+static const void *kRKContentOverlayAssocKey = &kRKContentOverlayAssocKey;
+
+@interface RosKenorContentOverlayView : UIView
+@property (nonatomic, weak) UIViewController *hostVC;
+@property (nonatomic, strong) UIImageView *bgImageView;
+@property (nonatomic, strong) UIView *scrimView;
+@property (nonatomic, strong) UIView *cardView;
+@property (nonatomic, strong) UIImageView *logoView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UIView *badgePill;
+@property (nonatomic, strong) UILabel *badgeLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) UILabel *detailLabel;
+@property (nonatomic, strong) UILabel *footerTipLabel;
+@property (nonatomic, strong) NSTimer *syncTimer;
+
+- (instancetype)initWithHostVC:(UIViewController *)hostVC frame:(CGRect)frame;
+- (void)layoutCustomSubviews;
+- (void)syncFromHost;
+@end
+
+@implementation RosKenorContentOverlayView
+
+- (instancetype)initWithHostVC:(UIViewController *)hostVC frame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _hostVC = hostVC;
+        self.backgroundColor = [UIColor colorWithRed:5/255.0 green:10/255.0 blue:20/255.0 alpha:1.0];
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+        // 1. Background Artwork
+        NSData *bgData = [NSData dataWithBytesNoCopy:(void *)kRKPlayBgJpg length:kRKPlayBgJpg_len freeWhenDone:NO];
+        UIImage *bgImg = [UIImage imageWithData:bgData];
+        _bgImageView = [[UIImageView alloc] initWithImage:bgImg];
+        _bgImageView.contentMode = UIViewContentModeScaleAspectFill;
+        _bgImageView.clipsToBounds = YES;
+        [self addSubview:_bgImageView];
+
+        // 2. Glassmorphic Dark Scrim
+        _scrimView = [[UIView alloc] init];
+        _scrimView.backgroundColor = [UIColor colorWithRed:6/255.0 green:12/255.0 blue:26/255.0 alpha:0.75];
+        [self addSubview:_scrimView];
+
+        // 3. Floating Glassmorphic Center Card
+        _cardView = [[UIView alloc] init];
+        _cardView.backgroundColor = [UIColor colorWithRed:10/255.0 green:20/255.0 blue:38/255.0 alpha:0.92];
+        _cardView.layer.cornerRadius = 22.0;
+        _cardView.layer.borderWidth = 1.5;
+        _cardView.layer.borderColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:0.45].CGColor;
+        _cardView.layer.shadowColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:0.35].CGColor;
+        _cardView.layer.shadowRadius = 24.0;
+        _cardView.layer.shadowOpacity = 0.85;
+        _cardView.layer.shadowOffset = CGSizeMake(0, 8.0);
+        [self addSubview:_cardView];
+
+        // 4. Ros Kenor Crest Logo
+        NSData *logoData = [NSData dataWithBytesNoCopy:(void *)kRKLogoPng length:kRKLogoPng_len freeWhenDone:NO];
+        UIImage *logoImg = [UIImage imageWithData:logoData];
+        _logoView = [[UIImageView alloc] initWithImage:logoImg];
+        _logoView.contentMode = UIViewContentModeScaleAspectFit;
+        [_cardView addSubview:_logoView];
+
+        // 5. Game Title
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.text = @"ROS KENOR";
+        _titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBlack];
+        _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+        [_cardView addSubview:_titleLabel];
+
+        // 6. Cyber Badge Pill
+        _badgePill = [[UIView alloc] init];
+        _badgePill.backgroundColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:0.12];
+        _badgePill.layer.cornerRadius = 11.0;
+        _badgePill.layer.borderWidth = 1.0;
+        _badgePill.layer.borderColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:0.45].CGColor;
+        [_cardView addSubview:_badgePill];
+
+        _badgeLabel = [[UILabel alloc] init];
+        _badgeLabel.text = @"UPDATING GAME CONTENT";
+        _badgeLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+        _badgeLabel.textColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:1.0];
+        _badgeLabel.textAlignment = NSTextAlignmentCenter;
+        [_badgePill addSubview:_badgeLabel];
+
+        // 7. Status Label
+        _statusLabel = [[UILabel alloc] init];
+        _statusLabel.text = @"Downloading game content...";
+        _statusLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        _statusLabel.textColor = [UIColor whiteColor];
+        _statusLabel.textAlignment = NSTextAlignmentCenter;
+        [_cardView addSubview:_statusLabel];
+
+        // 8. Progress Bar
+        _progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+        _progressBar.progressTintColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:1.0];
+        _progressBar.trackTintColor = [UIColor colorWithRed:25/255.0 green:40/255.0 blue:65/255.0 alpha:0.8];
+        _progressBar.layer.cornerRadius = 5.0;
+        _progressBar.clipsToBounds = YES;
+        [_cardView addSubview:_progressBar];
+
+        // 9. Detail Label
+        _detailLabel = [[UILabel alloc] init];
+        _detailLabel.text = @"0.00 GB / 0.00 GB";
+        _detailLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
+        _detailLabel.textColor = [UIColor colorWithRed:186/255.0 green:230/255.0 blue:253/255.0 alpha:1.0];
+        _detailLabel.textAlignment = NSTextAlignmentCenter;
+        [_cardView addSubview:_detailLabel];
+
+        // 10. Footer Tip
+        _footerTipLabel = [[UILabel alloc] init];
+        _footerTipLabel.text = @"⚡ Please keep Ros Kenor open while updating content";
+        _footerTipLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+        _footerTipLabel.textColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+        _footerTipLabel.textAlignment = NSTextAlignmentCenter;
+        [_cardView addSubview:_footerTipLabel];
+
+        [self layoutCustomSubviews];
+    }
+    return self;
+}
+
+- (void)layoutCustomSubviews {
+    CGRect bounds = self.bounds;
+    if (CGRectIsEmpty(bounds)) return;
+
+    _bgImageView.frame = bounds;
+    _scrimView.frame = bounds;
+
+    CGFloat cardW = MIN(bounds.size.width - 48.0, 520.0);
+    CGFloat cardH = 310.0;
+    CGFloat cardX = (bounds.size.width - cardW) / 2.0;
+    CGFloat cardY = (bounds.size.height - cardH) / 2.0;
+    _cardView.frame = CGRectMake(cardX, cardY, cardW, cardH);
+
+    CGFloat logoSize = 56.0;
+    _logoView.frame = CGRectMake((cardW - logoSize) / 2.0, 22.0, logoSize, logoSize);
+
+    _titleLabel.frame = CGRectMake(16.0, 84.0, cardW - 32.0, 22.0);
+
+    CGFloat pillW = 180.0;
+    CGFloat pillH = 22.0;
+    _badgePill.frame = CGRectMake((cardW - pillW) / 2.0, 110.0, pillW, pillH);
+    _badgeLabel.frame = _badgePill.bounds;
+
+    _statusLabel.frame = CGRectMake(20.0, 146.0, cardW - 40.0, 22.0);
+
+    CGFloat barW = cardW - 60.0;
+    _progressBar.frame = CGRectMake(30.0, 180.0, barW, 10.0);
+
+    _detailLabel.frame = CGRectMake(20.0, 202.0, cardW - 40.0, 20.0);
+
+    _footerTipLabel.frame = CGRectMake(20.0, 248.0, cardW - 40.0, 20.0);
+}
+
+- (void)syncFromHost {
+    if (!self.hostVC) return;
+
+    id statusObj = nil;
+    @try { statusObj = [self.hostVC valueForKey:@"status"]; } @catch (NSException *e) {}
+    if (!statusObj) {
+        @try { statusObj = [self.hostVC valueForKey:@"_status"]; } @catch (NSException *e) {}
+    }
+    if ([statusObj isKindOfClass:[UILabel class]]) {
+        UILabel *hostStatus = (UILabel *)statusObj;
+        hostStatus.hidden = YES;
+        if (hostStatus.text.length > 0) {
+            self.statusLabel.text = hostStatus.text;
+        }
+    }
+
+    id detailObj = nil;
+    @try { detailObj = [self.hostVC valueForKey:@"detail"]; } @catch (NSException *e) {}
+    if (!detailObj) {
+        @try { detailObj = [self.hostVC valueForKey:@"_detail"]; } @catch (NSException *e) {}
+    }
+    if ([detailObj isKindOfClass:[UILabel class]]) {
+        UILabel *hostDetail = (UILabel *)detailObj;
+        hostDetail.hidden = YES;
+        if (hostDetail.text.length > 0) {
+            self.detailLabel.text = hostDetail.text;
+        }
+    }
+
+    id barObj = nil;
+    @try { barObj = [self.hostVC valueForKey:@"bar"]; } @catch (NSException *e) {}
+    if (!barObj) {
+        @try { barObj = [self.hostVC valueForKey:@"_bar"]; } @catch (NSException *e) {}
+    }
+    if ([barObj isKindOfClass:[UIProgressView class]]) {
+        UIProgressView *hostBar = (UIProgressView *)barObj;
+        hostBar.hidden = YES;
+        [self.progressBar setProgress:hostBar.progress animated:YES];
+    }
+
+    id closeObj = nil;
+    @try { closeObj = [self.hostVC valueForKey:@"close"]; } @catch (NSException *e) {}
+    if (!closeObj) {
+        @try { closeObj = [self.hostVC valueForKey:@"_close"]; } @catch (NSException *e) {}
+    }
+    if ([closeObj isKindOfClass:[UIView class]]) {
+        ((UIView *)closeObj).hidden = YES;
+    }
+}
+
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    [super willMoveToWindow:newWindow];
+    if (newWindow) {
+        if (!_syncTimer) {
+            _syncTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                          target:self
+                                                        selector:@selector(syncFromHost)
+                                                        userInfo:nil
+                                                         repeats:YES];
+        }
+        [self syncFromHost];
+    } else {
+        [_syncTimer invalidate];
+        _syncTimer = nil;
+    }
+}
+
+- (void)dealloc {
+    [_syncTimer invalidate];
+    _syncTimer = nil;
+}
+
+@end
+
 @implementation RosKenorAuthController
 
 + (void)installLoginOverlayHooks {
@@ -1415,6 +1649,49 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
         method_setImplementation(layoutM, newLayout);
     }
     NSLog(@"[RosKenorRedirect] Installed redesigned RosLoginVC overlay & device-session auto-login hooks");
+}
+
++ (void)installContentOverlayHooks {
+    Class contentCls = objc_getClass("RosContentVC");
+    if (!contentCls) {
+        NSLog(@"[RosKenorRedirect] RosContentVC not found; skipping content UI overlay");
+        return;
+    }
+
+    Method vdl = class_getInstanceMethod(contentCls, @selector(viewDidLoad));
+    if (vdl) {
+        IMP origVDL = method_getImplementation(vdl);
+        IMP newVDL = imp_implementationWithBlock(^void(UIViewController *selfVC) {
+            ((void (*)(id, SEL))origVDL)(selfVC, @selector(viewDidLoad));
+            for (UIView *sub in selfVC.view.subviews) {
+                sub.hidden = YES;
+            }
+            RosKenorContentOverlayView *existing = objc_getAssociatedObject(selfVC, kRKContentOverlayAssocKey);
+            if (!existing) {
+                RosKenorContentOverlayView *overlay = [[RosKenorContentOverlayView alloc] initWithHostVC:selfVC frame:selfVC.view.bounds];
+                [selfVC.view addSubview:overlay];
+                objc_setAssociatedObject(selfVC, kRKContentOverlayAssocKey, overlay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        });
+        method_setImplementation(vdl, newVDL);
+    }
+
+    Method layoutM = class_getInstanceMethod(contentCls, @selector(viewDidLayoutSubviews));
+    if (layoutM) {
+        IMP origLayout = method_getImplementation(layoutM);
+        IMP newLayout = imp_implementationWithBlock(^void(UIViewController *selfVC) {
+            ((void (*)(id, SEL))origLayout)(selfVC, @selector(viewDidLayoutSubviews));
+            RosKenorContentOverlayView *overlay = objc_getAssociatedObject(selfVC, kRKContentOverlayAssocKey);
+            if (overlay) {
+                overlay.frame = selfVC.view.bounds;
+                [overlay layoutCustomSubviews];
+                [overlay syncFromHost];
+                [selfVC.view bringSubviewToFront:overlay];
+            }
+        });
+        method_setImplementation(layoutM, newLayout);
+    }
+    NSLog(@"[RosKenorRedirect] Installed redesigned RosContentVC downloader overlay hooks");
 }
 
 @end
