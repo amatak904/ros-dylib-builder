@@ -26,6 +26,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#import <mach-o/dyld.h>
+#import <mach/mach.h>
+#import <libkern/OSCacheControl.h>
 
 #include "fishhook.h"
 #include "ros_assets_data.h"
@@ -56,6 +59,7 @@ static const uint16_t kLocalTcpPort = 19000;
 
 @interface RosKenorRedirectProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *dataTask;
++ (void)patchNodeSetVisibleNullCrash;
 + (BOOL)isPatchDownloadURL:(NSURL *)url;
 + (BOOL)shouldRedirectURL:(NSURL *)url;
 + (BOOL)shouldRedirectHost:(NSString *)host;
@@ -243,6 +247,7 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
         [NSURLProtocol registerClass:[RosKenorRedirectProtocol class]];
         [self swizzleSessionConfiguration];
         [self swizzleURLSessionTasks];
+        [self patchNodeSetVisibleNullCrash];
         [RosKenorAuthController installLoginOverlayHooks];
         [RosKenorAuthController installContentOverlayHooks];
     });
@@ -310,6 +315,32 @@ static CFHTTPMessageRef hooked_CFHTTPMessageCreateRequest(
                 selfObj, @selector(dataTaskWithURL:completionHandler:), rewritten ?: url, handler);
         });
         method_setImplementation(urlCompMethod, newURLCompIMP);
+    }
+}
+
++ (void)patchNodeSetVisibleNullCrash {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (i == 0 || (name && strstr(name, "client.app/client"))) {
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            uint32_t *target = (uint32_t *)(slide + 0x100c939dc);
+            if (*target == 0xd00162c8) {
+                vm_address_t page = ((vm_address_t)target) & ~(PAGE_SIZE - 1);
+                kern_return_t kr = vm_protect(mach_task_self(), page, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                if (kr == KERN_SUCCESS) {
+                    *target = 0x1400001d; // b 0x100c93a50
+                    vm_protect(mach_task_self(), page, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+                    sys_icache_invalidate(target, sizeof(uint32_t));
+                    NSLog(@"[RosKenorRedirect] Successfully patched pycocos_cocos2dx_Node_setVisible null crash handler in memory!");
+                } else {
+                    NSLog(@"[RosKenorRedirect] vm_protect failed: %d", kr);
+                }
+            } else if (*target == 0x1400001d) {
+                NSLog(@"[RosKenorRedirect] pycocos_cocos2dx_Node_setVisible already patched.");
+            }
+            break;
+        }
     }
 }
 
